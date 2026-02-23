@@ -1,0 +1,10 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "robokassa-rn": ["../src/index"],
+      "robokassa-rn/*": ["../src/*"]
+    }
+  }
+}
