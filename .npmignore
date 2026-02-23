@@ -12,3 +12,6 @@ __tests__
 /android/src/test/
 /android/build/
 /example/
+/robokassa-sdk/
+/vendor/Robokassa_Library/src/androidTest/
+/vendor/Robokassa_Library/src/test/

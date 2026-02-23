@@ -9,6 +9,12 @@ applyKotlinExpoModulesCorePlugin()
 useCoreDependencies()
 useExpoPublishing()
 
+repositories {
+  flatDir {
+    dirs "$projectDir/libs"
+  }
+}
+
 // If you want to use the managed Android SDK versions from expo-modules-core, set this to true.
 // The Android SDK versions will be bumped from time to time in SDK releases and may introduce breaking changes in your module code.
 // Most of the time, you may like to manage the Android SDK versions yourself.
@@ -40,4 +46,9 @@ android {
   lintOptions {
     abortOnError false
   }
+}
+
+dependencies {
+  // Drop Robokassa SDK *.aar files into android/libs to include them automatically.
+  implementation fileTree(dir: "libs", include: ["*.aar"])
 }

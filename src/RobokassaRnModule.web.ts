@@ -1,15 +1,15 @@
 import { registerWebModule, NativeModule } from 'expo';
 
-import { RobokassaRnModuleEvents } from './RobokassaRn.types';
+import { RobokassaPaymentOptions, RobokassaPaymentResult, RobokassaRnModuleEvents } from './RobokassaRn.types';
 
 class RobokassaRnModule extends NativeModule<RobokassaRnModuleEvents> {
-  PI = Math.PI;
-  async setValueAsync(value: string): Promise<void> {
-    this.emit('onChange', { value });
+  isRobokassaSdkAvailable(): boolean {
+    return false;
   }
-  hello() {
-    return 'Hello world! 👋';
+
+  async startPaymentAsync(_: RobokassaPaymentOptions): Promise<RobokassaPaymentResult> {
+    throw new Error('robokassa-rn works only on Android');
   }
 }
 
-export default registerWebModule(RobokassaRnModule, 'RobokassaRnModule');
+export default registerWebModule(RobokassaRnModule, 'RobokassaRn');

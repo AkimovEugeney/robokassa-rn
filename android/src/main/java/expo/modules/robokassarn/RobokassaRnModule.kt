@@ -1,50 +1,552 @@
 package expo.modules.robokassarn
 
+import android.app.Activity
+import expo.modules.kotlin.functions.Coroutine
+import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import java.net.URL
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Proxy
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class RobokassaRnModule : Module() {
-  // Each module class must implement the definition function. The definition consists of components
-  // that describes the module's functionality and behavior.
-  // See https://docs.expo.dev/modules/module-api for more details about available components.
+  @Volatile
+  private var pendingPaymentContinuation: CancellableContinuation<RobokassaPaymentResult>? = null
+
+  private var activeLauncher: Any? = null
+
+  private val paymentLock = Any()
+
   override fun definition() = ModuleDefinition {
-    // Sets the name of the module that JavaScript code will use to refer to the module. Takes a string as an argument.
-    // Can be inferred from module's class name, but it's recommended to set it explicitly for clarity.
-    // The module will be accessible from `requireNativeModule('RobokassaRn')` in JavaScript.
     Name("RobokassaRn")
 
-    // Defines constant property on the module.
-    Constant("PI") {
-      Math.PI
+    Function("isRobokassaSdkAvailable") {
+      isClassAvailable(PAYMENT_LAUNCHER_CLASS) && isClassAvailable(PAYMENT_PARAMS_CLASS)
     }
 
-    // Defines event names that the module can send to JavaScript.
-    Events("onChange")
+    (AsyncFunction("startPaymentAsync") Coroutine { options: RobokassaPaymentOptions ->
+      val activity = appContext.currentActivity ?: throw MissingCurrentActivityException()
+      launchPaymentAndAwaitResult(activity, options)
+    }).runOnQueue(Queues.MAIN)
 
-    // Defines a JavaScript synchronous function that runs the native code on the JavaScript thread.
-    Function("hello") {
-      "Hello world! 👋"
+    OnDestroy {
+      failPendingPayment(PaymentFlowInterruptedException())
     }
+  }
 
-    // Defines a JavaScript function that always returns a Promise and whose native code
-    // is by default dispatched on the different thread than the JavaScript runtime runs on.
-    AsyncFunction("setValueAsync") { value: String ->
-      // Send an event to JavaScript.
-      sendEvent("onChange", mapOf(
-        "value" to value
-      ))
-    }
-
-    // Enables the module to be used as a native view. Definition components that are accepted as part of
-    // the view definition: Prop, Events.
-    View(RobokassaRnView::class) {
-      // Defines a setter for the `url` prop.
-      Prop("url") { view: RobokassaRnView, url: URL ->
-        view.webView.loadUrl(url.toString())
+  private suspend fun launchPaymentAndAwaitResult(
+    activity: Activity,
+    options: RobokassaPaymentOptions
+  ): RobokassaPaymentResult = suspendCancellableCoroutine { continuation ->
+    synchronized(paymentLock) {
+      if (pendingPaymentContinuation != null) {
+        continuation.resumeWithException(PaymentInProgressException())
+        return@suspendCancellableCoroutine
       }
-      // Defines an event that the view can send to JavaScript.
-      Events("onLoad")
+
+      pendingPaymentContinuation = continuation
     }
+
+    continuation.invokeOnCancellation {
+      clearPendingState()
+    }
+
+    try {
+      val launcher = createLauncher(activity)
+      activeLauncher = launcher
+      attachPaymentResultCallback(launcher)
+
+      val paymentParams = createPaymentParams(options)
+      launchPayment(launcher, paymentParams)
+    } catch (error: Throwable) {
+      clearPendingState()
+      continuation.resumeWithException(
+        RobokassaSdkInvocationException(
+          "Failed to start Robokassa payment flow.",
+          unwrapThrowable(error)
+        )
+      )
+    }
+  }
+
+  private fun createLauncher(activity: Activity): Any {
+    val launcherClass = loadRequiredClass(PAYMENT_LAUNCHER_CLASS)
+
+    val constructor = launcherClass.constructors.firstOrNull { candidate ->
+      candidate.parameterTypes.size == 1 && candidate.parameterTypes[0].isAssignableFrom(activity.javaClass)
+    } ?: throw UnsupportedSdkVersionException(
+      "RobokassaPayLauncher(Activity) constructor was not found. Check SDK version."
+    )
+
+    return constructor.newInstance(activity)
+  }
+
+  private fun attachPaymentResultCallback(launcher: Any) {
+    val callbackMethod = launcher.javaClass.methods.firstOrNull { candidate ->
+      candidate.name == "setPaymentResultCallback" && candidate.parameterTypes.size == 1
+    } ?: throw UnsupportedSdkVersionException(
+      "setPaymentResultCallback(listener) was not found in RobokassaPayLauncher."
+    )
+
+    val listenerType = callbackMethod.parameterTypes[0]
+    val callback = Proxy.newProxyInstance(
+      listenerType.classLoader,
+      arrayOf(listenerType)
+    ) { _, method, args ->
+      when (method.name) {
+        "onSuccessPayment" -> {
+          val invoiceId = (args?.firstOrNull() as? Number)?.toInt()
+          completePendingPayment(RobokassaPaymentResult(status = "success", invoiceId = invoiceId))
+          Unit
+        }
+
+        "onCanceledPayment" -> {
+          completePendingPayment(RobokassaPaymentResult(status = "cancelled"))
+          Unit
+        }
+
+        "onErrorPayment" -> {
+          val errorPayload = args?.firstOrNull()
+          completePendingPayment(
+            RobokassaPaymentResult(
+              status = "error",
+              errorCode = extractErrorValue(errorPayload, listOf("getCode", "getErrorCode", "code", "errorCode")),
+              errorDescription = extractErrorValue(errorPayload, listOf("getDescription", "getErrorDescription", "description", "message", "getMessage"))
+            )
+          )
+          Unit
+        }
+
+        "toString" -> "RobokassaPaymentResultListenerProxy"
+        "hashCode" -> System.identityHashCode(this)
+        "equals" -> false
+        else -> null
+      }
+    }
+
+    callbackMethod.invoke(launcher, callback)
+  }
+
+  private fun createPaymentParams(options: RobokassaPaymentOptions): Any {
+    val paymentParamsClass = loadRequiredClass(PAYMENT_PARAMS_CLASS)
+    val cultureValue = resolveCultureConstant(options.culture)
+
+    instantiateWithConstructors(paymentParamsClass, options, cultureValue)?.let {
+      applyExtraParams(it, options.extra)
+      return it
+    }
+    instantiateWithNoArgAndSetters(paymentParamsClass, options, cultureValue)?.let {
+      applyExtraParams(it, options.extra)
+      return it
+    }
+
+    throw UnsupportedSdkVersionException(
+      "Unable to instantiate PaymentParams. Check SDK compatibility."
+    )
+  }
+
+  private fun instantiateWithConstructors(
+    paymentParamsClass: Class<*>,
+    options: RobokassaPaymentOptions,
+    cultureValue: Any?
+  ): Any? {
+    val constructors = paymentParamsClass.declaredConstructors.sortedByDescending { it.parameterTypes.size }
+
+    constructors.forEach { constructor ->
+      val arguments = constructor.parameterTypes.mapIndexed { index, parameterType ->
+        buildArgumentForParameter(index, parameterType, options, cultureValue)
+      }.toTypedArray()
+
+      try {
+        constructor.isAccessible = true
+        return constructor.newInstance(*arguments)
+      } catch (_: Throwable) {
+        // Continue with next constructor candidate.
+      }
+    }
+
+    return null
+  }
+
+  private fun instantiateWithNoArgAndSetters(
+    paymentParamsClass: Class<*>,
+    options: RobokassaPaymentOptions,
+    cultureValue: Any?
+  ): Any? {
+    val normalizedExtra = normalizeExtraParams(options.extra)
+    val constructor = paymentParamsClass.declaredConstructors.firstOrNull { it.parameterTypes.isEmpty() } ?: return null
+
+    val paymentParams = constructor.newInstance()
+    invokeMethodIfPresent(paymentParams, "setCredentials", options.merchantLogin, options.password1, options.password2, "")
+
+    setPropertyIfPresent(paymentParams, "merchantLogin", options.merchantLogin)
+    setPropertyIfPresent(paymentParams, "password1", options.password1)
+    setPropertyIfPresent(paymentParams, "password2", options.password2)
+    setPropertyIfPresent(paymentParams, "invoiceId", options.invoiceId)
+    setPropertyIfPresent(paymentParams, "orderSum", options.orderSum)
+    setPropertyIfPresent(paymentParams, "description", options.description)
+    setPropertyIfPresent(paymentParams, "email", options.email)
+    setPropertyIfPresent(paymentParams, "culture", cultureValue ?: options.culture.value)
+    setPropertyIfPresent(paymentParams, "isRecurrent", options.isRecurrent)
+    setPropertyIfPresent(paymentParams, "isHold", options.isHold)
+    setPropertyIfPresent(paymentParams, "toolbarText", options.toolbarText)
+    setPropertyIfPresent(paymentParams, "previousInvoiceId", options.previousInvoiceId)
+    setPropertyIfPresent(paymentParams, "token", options.token)
+    setPropertyIfPresent(paymentParams, "extra", normalizedExtra)
+    setPropertyIfPresent(paymentParams, "extraParams", normalizedExtra)
+    setPropertyIfPresent(paymentParams, "customParams", normalizedExtra)
+
+    val orderParams = resolveNestedParams(
+      owner = paymentParams,
+      getterNames = listOf("getOrderParams", "getOrder"),
+      propertyName = "order",
+      className = ORDER_PARAMS_CLASS
+    )
+    if (orderParams != null) {
+      setPropertyIfPresent(orderParams, "invoiceId", options.invoiceId)
+      setPropertyIfPresent(orderParams, "orderSum", options.orderSum)
+      setPropertyIfPresent(orderParams, "description", options.description)
+      setPropertyIfPresent(orderParams, "isRecurrent", options.isRecurrent)
+      setPropertyIfPresent(orderParams, "isHold", options.isHold)
+      setPropertyIfPresent(orderParams, "previousInvoiceId", options.previousInvoiceId)
+      setPropertyIfPresent(orderParams, "token", options.token)
+      setPropertyIfPresent(orderParams, "extra", normalizedExtra)
+      setPropertyIfPresent(orderParams, "extraParams", normalizedExtra)
+      setPropertyIfPresent(orderParams, "customParams", normalizedExtra)
+    }
+
+    val customerParams = resolveNestedParams(
+      owner = paymentParams,
+      getterNames = listOf("getCustomerParams", "getCustomer"),
+      propertyName = "customer",
+      className = CUSTOMER_PARAMS_CLASS
+    )
+    if (customerParams != null) {
+      setPropertyIfPresent(customerParams, "email", options.email)
+      setPropertyIfPresent(customerParams, "culture", cultureValue ?: options.culture.value)
+    }
+
+    val viewParams = resolveNestedParams(
+      owner = paymentParams,
+      getterNames = listOf("getViewParams", "getView"),
+      propertyName = "view",
+      className = VIEW_PARAMS_CLASS
+    )
+    if (viewParams != null) {
+      setPropertyIfPresent(viewParams, "toolbarText", options.toolbarText)
+    }
+
+    return paymentParams
+  }
+
+  private fun launchPayment(launcher: Any, paymentParams: Any) {
+    val launchMethod = launcher.javaClass.methods.firstOrNull { candidate ->
+      candidate.name == "launch" &&
+        candidate.parameterTypes.size == 1 &&
+        candidate.parameterTypes[0].isAssignableFrom(paymentParams.javaClass)
+    } ?: launcher.javaClass.methods.firstOrNull { candidate ->
+      candidate.name == "launch" && candidate.parameterTypes.size == 1
+    } ?: throw UnsupportedSdkVersionException("launch(PaymentParams) was not found in RobokassaPayLauncher.")
+
+    launchMethod.invoke(launcher, paymentParams)
+  }
+
+  private fun buildArgumentForParameter(
+    index: Int,
+    parameterType: Class<*>,
+    options: RobokassaPaymentOptions,
+    cultureValue: Any?
+  ): Any? {
+    return when (index) {
+      0 -> coerceValue(parameterType, options.merchantLogin)
+      1 -> coerceValue(parameterType, options.password1)
+      2 -> coerceValue(parameterType, options.password2)
+      3 -> coerceValue(parameterType, options.invoiceId)
+      4 -> coerceValue(parameterType, options.orderSum)
+      5 -> coerceValue(parameterType, options.description)
+      6 -> coerceValue(parameterType, options.email)
+      7 -> {
+        val fallbackCulture = if (parameterType == String::class.java) options.culture.value else options.culture.name
+        coerceValue(parameterType, cultureValue ?: fallbackCulture)
+      }
+
+      8 -> coerceValue(parameterType, options.isRecurrent)
+      9 -> coerceValue(parameterType, options.isHold)
+      10 -> coerceValue(parameterType, options.toolbarText)
+      11 -> coerceValue(parameterType, options.previousInvoiceId)
+      12 -> coerceValue(parameterType, options.token)
+      13 -> coerceValue(parameterType, normalizeExtraParams(options.extra))
+      else -> defaultValueForType(parameterType)
+    }
+  }
+
+  private fun resolveCultureConstant(culture: RobokassaCulture): Any? {
+    val cultureClass = CULTURE_CLASS_CANDIDATES.firstNotNullOfOrNull { className ->
+      loadOptionalClass(className)
+    } ?: return null
+    if (!cultureClass.isEnum) {
+      return null
+    }
+
+    val requestedValue = culture.value
+    val constants = cultureClass.enumConstants ?: return null
+
+    return constants.firstOrNull { constant ->
+      val enumName = (constant as Enum<*>).name
+      enumName.equals(requestedValue, ignoreCase = true)
+    } ?: constants.firstOrNull()
+  }
+
+  private fun applyExtraParams(paymentParams: Any, extra: Map<String, String>?) {
+    val normalizedExtra = normalizeExtraParams(extra)
+    if (normalizedExtra.isEmpty()) {
+      return
+    }
+
+    setPropertyIfPresent(paymentParams, "extra", normalizedExtra)
+    setPropertyIfPresent(paymentParams, "extraParams", normalizedExtra)
+    setPropertyIfPresent(paymentParams, "customParams", normalizedExtra)
+
+    val orderParams = resolveNestedParams(
+      owner = paymentParams,
+      getterNames = listOf("getOrderParams", "getOrder"),
+      propertyName = "order",
+      className = ORDER_PARAMS_CLASS
+    ) ?: return
+
+    setPropertyIfPresent(orderParams, "extra", normalizedExtra)
+    setPropertyIfPresent(orderParams, "extraParams", normalizedExtra)
+    setPropertyIfPresent(orderParams, "customParams", normalizedExtra)
+  }
+
+  private fun resolveNestedParams(
+    owner: Any,
+    getterNames: List<String>,
+    propertyName: String,
+    className: String
+  ): Any? {
+    getterNames.forEach { getterName ->
+      invokeMethodIfPresent(owner, getterName)?.let { return it }
+    }
+
+    val paramsClass = loadOptionalClass(className) ?: return null
+    val constructor = paramsClass.declaredConstructors.firstOrNull { it.parameterTypes.isEmpty() } ?: return null
+    val paramsInstance = runCatching {
+      constructor.isAccessible = true
+      constructor.newInstance()
+    }.getOrNull() ?: return null
+
+    setPropertyIfPresent(owner, propertyName, paramsInstance)
+    return paramsInstance
+  }
+
+  private fun normalizeExtraParams(extra: Map<String, String>?): Map<String, String> {
+    if (extra.isNullOrEmpty()) {
+      return emptyMap()
+    }
+
+    val normalized = linkedMapOf<String, String>()
+    extra.forEach { (rawKey, rawValue) ->
+      val key = rawKey.trim()
+      val value = rawValue.trim()
+      if (key.isEmpty() || value.isEmpty()) {
+        return@forEach
+      }
+
+      val normalizedKey = normalizeShpKey(key)
+      if (normalizedKey.isEmpty()) {
+        return@forEach
+      }
+
+      val existingKey = normalized.keys.firstOrNull { it.equals(normalizedKey, ignoreCase = true) }
+      if (existingKey != null) {
+        normalized.remove(existingKey)
+      }
+      normalized[normalizedKey] = value
+    }
+    return normalized
+  }
+
+  private fun normalizeShpKey(key: String): String {
+    val keyWithoutPrefix = if (key.startsWith("shp_", ignoreCase = true)) {
+      key.substring(4).trim()
+    } else {
+      key.trim()
+    }
+    if (keyWithoutPrefix.isEmpty()) {
+      return ""
+    }
+    return "Shp_$keyWithoutPrefix"
+  }
+
+  private fun extractErrorValue(errorPayload: Any?, candidates: List<String>): String? {
+    if (errorPayload == null) {
+      return null
+    }
+
+    val errorClass = errorPayload.javaClass
+    candidates.forEach { candidate ->
+      val accessor = errorClass.methods.firstOrNull { method ->
+        method.name == candidate && method.parameterTypes.isEmpty()
+      }
+
+      val accessorValue = accessor?.let { method ->
+        runCatching { method.invoke(errorPayload)?.toString() }.getOrNull()
+      }
+      if (!accessorValue.isNullOrBlank()) {
+        return accessorValue
+      }
+
+      val field = errorClass.declaredFields.firstOrNull { it.name.equals(candidate, ignoreCase = true) }
+      val fieldValue = field?.let { declaredField ->
+        runCatching {
+          declaredField.isAccessible = true
+          declaredField.get(errorPayload)?.toString()
+        }.getOrNull()
+      }
+      if (!fieldValue.isNullOrBlank()) {
+        return fieldValue
+      }
+    }
+
+    return errorPayload.toString().takeIf { it.isNotBlank() }
+  }
+
+  private fun invokeMethodIfPresent(target: Any, methodName: String, vararg values: Any?): Any? {
+    val method = target.javaClass.methods.firstOrNull { candidate ->
+      candidate.name == methodName && candidate.parameterTypes.size == values.size
+    } ?: return null
+
+    val arguments = method.parameterTypes.mapIndexed { index, parameterType ->
+      coerceValue(parameterType, values[index])
+    }.toTypedArray()
+
+    return runCatching { method.invoke(target, *arguments) }.getOrNull()
+  }
+
+  private fun setPropertyIfPresent(target: Any, propertyName: String, value: Any?) {
+    val setterName = "set${propertyName.replaceFirstChar { character -> character.uppercaseChar() }}"
+    val setter = target.javaClass.methods.firstOrNull { method ->
+      method.name.equals(setterName, ignoreCase = true) &&
+        method.parameterTypes.size == 1
+    }
+
+    if (setter != null) {
+      runCatching {
+        setter.invoke(target, coerceValue(setter.parameterTypes[0], value))
+      }
+      return
+    }
+
+    var targetClass: Class<*>? = target.javaClass
+    while (targetClass != null) {
+      val field = targetClass.declaredFields.firstOrNull { candidate ->
+        candidate.name.equals(propertyName, ignoreCase = true)
+      }
+      if (field != null) {
+        runCatching {
+          field.isAccessible = true
+          field.set(target, coerceValue(field.type, value))
+        }
+        return
+      }
+      targetClass = targetClass.superclass
+    }
+  }
+
+  private fun coerceValue(type: Class<*>, value: Any?): Any? {
+    if (value == null) {
+      return defaultValueForType(type)
+    }
+
+    if (type.isAssignableFrom(value.javaClass)) {
+      return value
+    }
+
+    return when {
+      type == String::class.java -> value.toString()
+      type == Int::class.java || type == Int::class.javaPrimitiveType -> (value as? Number)?.toInt() ?: value.toString().toIntOrNull() ?: 0
+      type == Double::class.java || type == Double::class.javaPrimitiveType -> (value as? Number)?.toDouble() ?: value.toString().toDoubleOrNull() ?: 0.0
+      type == Float::class.java || type == Float::class.javaPrimitiveType -> (value as? Number)?.toFloat() ?: value.toString().toFloatOrNull() ?: 0f
+      type == Long::class.java || type == Long::class.javaPrimitiveType -> (value as? Number)?.toLong() ?: value.toString().toLongOrNull() ?: 0L
+      type == Boolean::class.java || type == Boolean::class.javaPrimitiveType -> value as? Boolean ?: value.toString().equals("true", ignoreCase = true)
+      type.isEnum && value is String -> type.enumConstants?.firstOrNull { candidate ->
+        (candidate as Enum<*>).name.equals(value, ignoreCase = true)
+      } ?: defaultValueForType(type)
+      else -> defaultValueForType(type)
+    }
+  }
+
+  private fun defaultValueForType(type: Class<*>): Any? {
+    return when (type) {
+      String::class.java -> ""
+      Int::class.javaPrimitiveType, Int::class.java -> 0
+      Long::class.javaPrimitiveType, Long::class.java -> 0L
+      Double::class.javaPrimitiveType, Double::class.java -> 0.0
+      Float::class.javaPrimitiveType, Float::class.java -> 0f
+      Boolean::class.javaPrimitiveType, Boolean::class.java -> false
+      Short::class.javaPrimitiveType, Short::class.java -> 0.toShort()
+      Byte::class.javaPrimitiveType, Byte::class.java -> 0.toByte()
+      Char::class.javaPrimitiveType, Char::class.java -> '\u0000'
+      else -> if (type.isEnum) type.enumConstants?.firstOrNull() else null
+    }
+  }
+
+  private fun completePendingPayment(result: RobokassaPaymentResult) {
+    val continuation = clearPendingState() ?: return
+    runCatching {
+      continuation.resume(result)
+    }
+  }
+
+  private fun failPendingPayment(error: Throwable) {
+    val continuation = clearPendingState() ?: return
+    runCatching {
+      continuation.resumeWithException(unwrapThrowable(error))
+    }
+  }
+
+  private fun clearPendingState(): CancellableContinuation<RobokassaPaymentResult>? {
+    synchronized(paymentLock) {
+      activeLauncher = null
+      val continuation = pendingPaymentContinuation
+      pendingPaymentContinuation = null
+      return continuation
+    }
+  }
+
+  private fun loadRequiredClass(className: String): Class<*> {
+    return loadOptionalClass(className) ?: throw RobokassaSdkMissingException(className)
+  }
+
+  private fun loadOptionalClass(className: String): Class<*>? {
+    return runCatching { Class.forName(className) }.getOrNull()
+  }
+
+  private fun isClassAvailable(className: String): Boolean {
+    return loadOptionalClass(className) != null
+  }
+
+  private fun unwrapThrowable(throwable: Throwable): Throwable {
+    return if (throwable is InvocationTargetException && throwable.targetException != null) {
+      throwable.targetException
+    } else {
+      throwable
+    }
+  }
+
+  companion object {
+    private const val PAYMENT_LAUNCHER_CLASS = "com.robokassa.library.pay.RobokassaPayLauncher"
+    private const val PAYMENT_PARAMS_CLASS = "com.robokassa.library.params.PaymentParams"
+    private const val ORDER_PARAMS_CLASS = "com.robokassa.library.params.OrderParams"
+    private const val CUSTOMER_PARAMS_CLASS = "com.robokassa.library.params.CustomerParams"
+    private const val VIEW_PARAMS_CLASS = "com.robokassa.library.params.ViewParams"
+    private val CULTURE_CLASS_CANDIDATES = listOf(
+      "com.robokassa.library.params.Culture",
+      "com.robokassa.library.models.Culture"
+    )
   }
 }

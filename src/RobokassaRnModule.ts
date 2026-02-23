@@ -1,11 +1,10 @@
 import { NativeModule, requireNativeModule } from 'expo';
 
-import { RobokassaRnModuleEvents } from './RobokassaRn.types';
+import { RobokassaPaymentOptions, RobokassaPaymentResult, RobokassaRnModuleEvents } from './RobokassaRn.types';
 
 declare class RobokassaRnModule extends NativeModule<RobokassaRnModuleEvents> {
-  PI: number;
-  hello(): string;
-  setValueAsync(value: string): Promise<void>;
+  isRobokassaSdkAvailable(): boolean;
+  startPaymentAsync(options: RobokassaPaymentOptions): Promise<RobokassaPaymentResult>;
 }
 
 // This call loads the native module object from the JSI.
