@@ -10,10 +10,10 @@ export type RobokassaPaymentOptions = {
   merchantLogin: string;
   password1: string;
   password2: string;
-  invoiceId: number;
+  invoiceId?: number;
   orderSum: number;
   description: string;
-  email: string;
+  email?: string;
   culture?: RobokassaCulture;
   isRecurrent?: boolean;
   isHold?: boolean;
