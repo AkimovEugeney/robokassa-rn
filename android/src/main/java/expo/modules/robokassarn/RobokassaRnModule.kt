@@ -64,7 +64,7 @@ class RobokassaRnModule : Module() {
 
     try {
       val paymentParams = createPaymentParams(options)
-      launchPaymentActivity(activity, paymentParams)
+      launchPaymentActivity(activity, paymentParams, options.testMode)
     } catch (error: Throwable) {
       clearPendingState()
       val root = unwrapThrowable(error)
@@ -96,7 +96,7 @@ class RobokassaRnModule : Module() {
   }
 
   @Suppress("DEPRECATION")
-  private fun launchPaymentActivity(activity: Activity, paymentParams: Any) {
+  private fun launchPaymentActivity(activity: Activity, paymentParams: Any, testMode: Boolean) {
     val activityClass = loadRequiredClass(ROBOKASSA_ACTIVITY_CLASS)
     if (!Activity::class.java.isAssignableFrom(activityClass)) {
       throw UnsupportedSdkVersionException("RobokassaActivity class is not an Activity.")
@@ -110,7 +110,7 @@ class RobokassaRnModule : Module() {
 
     val intent = Intent(activity, target).apply {
       putExtra(EXTRA_PARAMS, parcelableParams)
-      putExtra(EXTRA_TEST_PARAMETERS, false)
+      putExtra(EXTRA_TEST_PARAMETERS, testMode)
       putExtra(EXTRA_ONLY_CHECK, false)
     }
 
@@ -196,6 +196,9 @@ class RobokassaRnModule : Module() {
     setPropertyIfPresent(paymentParams, "isRecurrent", options.isRecurrent)
     setPropertyIfPresent(paymentParams, "isHold", options.isHold)
     setPropertyIfPresent(paymentParams, "toolbarText", options.toolbarText)
+    setPropertyIfPresent(paymentParams, "toolbarBgColor", options.toolbarBgColor)
+    setPropertyIfPresent(paymentParams, "toolbarTextColor", options.toolbarTextColor)
+    setPropertyIfPresent(paymentParams, "hasToolbar", options.hasToolbar)
     setPropertyIfPresent(paymentParams, "previousInvoiceId", options.previousInvoiceId)
     setPropertyIfPresent(paymentParams, "token", options.token)
     setPropertyIfPresent(paymentParams, "extra", normalizedExtra)
@@ -240,6 +243,9 @@ class RobokassaRnModule : Module() {
     )
     if (viewParams != null) {
       setPropertyIfPresent(viewParams, "toolbarText", options.toolbarText)
+      setPropertyIfPresent(viewParams, "toolbarBgColor", options.toolbarBgColor)
+      setPropertyIfPresent(viewParams, "toolbarTextColor", options.toolbarTextColor)
+      setPropertyIfPresent(viewParams, "hasToolbar", options.hasToolbar)
     }
 
     return paymentParams
@@ -270,6 +276,9 @@ class RobokassaRnModule : Module() {
       11 -> coerceValue(parameterType, options.previousInvoiceId)
       12 -> coerceValue(parameterType, options.token)
       13 -> coerceValue(parameterType, normalizeExtraParams(options.extra))
+      14 -> coerceValue(parameterType, options.toolbarBgColor)
+      15 -> coerceValue(parameterType, options.toolbarTextColor)
+      16 -> coerceValue(parameterType, options.hasToolbar)
       else -> defaultValueForType(parameterType)
     }
   }

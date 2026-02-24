@@ -60,7 +60,11 @@ async function pay(currentUserId: string) {
     description: 'Оплата заказа #12345',
     email: 'user@example.com',
     culture: 'ru',
+    testMode: false,
     toolbarText: 'Оплата заказа',
+    toolbarBgColor: '#111111',
+    toolbarTextColor: '#FFFFFF',
+    hasToolbar: true,
     extra: {
       userId: currentUserId,
       Shp_subscriptionType: 'premium'
@@ -90,6 +94,7 @@ async function pay(currentUserId: string) {
 - `orderSum` — сумма платежа.
 - `description` — описание платежа.
 - `email` — email покупателя.
+- `testMode` — тестовый режим Robokassa (`true` для тестовой оплаты).
 
 ## Пользовательские параметры (`extra`)
 
@@ -107,6 +112,13 @@ extra: {
   Shp_plan: 'premium'         // -> Shp_plan=premium
 }
 ```
+
+## Настройка внешнего вида окна оплаты
+
+- `toolbarText` — заголовок в верхней панели.
+- `toolbarBgColor` — цвет фона верхней панели (`#RRGGBB`).
+- `toolbarTextColor` — цвет текста верхней панели (`#RRGGBB`).
+- `hasToolbar` — показывать верхнюю панель (`true/false`).
 
 ## Результат `startPaymentAsync`
 

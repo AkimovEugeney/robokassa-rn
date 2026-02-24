@@ -18,9 +18,13 @@ data class RobokassaPaymentOptions(
   @Field val description: String,
   @Field val email: String? = null,
   @Field val culture: RobokassaCulture = RobokassaCulture.RU,
+  @Field val testMode: Boolean = false,
   @Field val isRecurrent: Boolean = false,
   @Field val isHold: Boolean = false,
   @Field val toolbarText: String? = null,
+  @Field val toolbarBgColor: String? = null,
+  @Field val toolbarTextColor: String? = null,
+  @Field val hasToolbar: Boolean = true,
   @Field val previousInvoiceId: Int? = null,
   @Field val token: String? = null,
   @Field val extra: Map<String, String>? = null

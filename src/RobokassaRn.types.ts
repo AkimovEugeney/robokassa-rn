@@ -15,9 +15,13 @@ export type RobokassaPaymentOptions = {
   description: string;
   email?: string;
   culture?: RobokassaCulture;
+  testMode?: boolean;
   isRecurrent?: boolean;
   isHold?: boolean;
   toolbarText?: string;
+  toolbarBgColor?: string;
+  toolbarTextColor?: string;
+  hasToolbar?: boolean;
   previousInvoiceId?: number;
   token?: string;
   extra?: Record<string, string>;
