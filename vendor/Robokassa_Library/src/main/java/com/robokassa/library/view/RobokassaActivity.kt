@@ -28,7 +28,6 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.robokassa.library.EXTRA_CODE_RESULT
 import com.robokassa.library.EXTRA_CODE_STATE
-import com.robokassa.library.EXTRA_ERROR
 import com.robokassa.library.EXTRA_ERROR_DESC
 import com.robokassa.library.EXTRA_INVOICE_ID
 import com.robokassa.library.EXTRA_ONLY_CHECK
@@ -155,7 +154,6 @@ class RobokassaActivity : AppCompatActivity() {
                         putExtra(EXTRA_CODE_STATE, it.stateCode)
                         putExtra(EXTRA_ERROR_DESC, it.desc)
                         putExtra(EXTRA_OP_KEY, it.opKey)
-                        putExtra(EXTRA_ERROR, it.error)
                     }
                     when (it.stateCode) {
                         CheckPayStateCode.NOT_INITED,
