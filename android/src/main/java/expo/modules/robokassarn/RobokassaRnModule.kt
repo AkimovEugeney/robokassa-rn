@@ -67,10 +67,11 @@ class RobokassaRnModule : Module() {
       launchPaymentActivity(activity, paymentParams)
     } catch (error: Throwable) {
       clearPendingState()
+      val root = unwrapThrowable(error)
       continuation.resumeWithException(
         RobokassaSdkInvocationException(
-          "Failed to start Robokassa payment flow.",
-          unwrapThrowable(error)
+          "Failed to start Robokassa payment flow: ${root.message ?: "unknown"}",
+          root
         )
       )
     }
@@ -80,11 +81,11 @@ class RobokassaRnModule : Module() {
     val paymentParamsClass = loadRequiredClass(PAYMENT_PARAMS_CLASS)
     val cultureValue = resolveCultureConstant(options.culture)
 
-    instantiateWithConstructors(paymentParamsClass, options, cultureValue)?.let {
+    instantiateWithNoArgAndSetters(paymentParamsClass, options, cultureValue)?.let {
       applyExtraParams(it, options.extra)
       return it
     }
-    instantiateWithNoArgAndSetters(paymentParamsClass, options, cultureValue)?.let {
+    instantiateWithConstructors(paymentParamsClass, options, cultureValue)?.let {
       applyExtraParams(it, options.extra)
       return it
     }
@@ -153,7 +154,9 @@ class RobokassaRnModule : Module() {
     options: RobokassaPaymentOptions,
     cultureValue: Any?
   ): Any? {
-    val constructors = paymentParamsClass.declaredConstructors.sortedByDescending { it.parameterTypes.size }
+    val constructors = paymentParamsClass.declaredConstructors
+      .filter { it.parameterTypes.isNotEmpty() }
+      .sortedByDescending { it.parameterTypes.size }
 
     constructors.forEach { constructor ->
       val arguments = constructor.parameterTypes.mapIndexed { index, parameterType ->
