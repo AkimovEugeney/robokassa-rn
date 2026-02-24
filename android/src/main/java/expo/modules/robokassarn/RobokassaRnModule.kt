@@ -1,12 +1,15 @@
 package expo.modules.robokassarn
 
 import android.app.Activity
+import android.content.Intent
+import android.os.Build
+import android.os.Parcelable
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import java.io.Serializable
 import java.lang.reflect.InvocationTargetException
-import java.lang.reflect.Proxy
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -16,21 +19,26 @@ class RobokassaRnModule : Module() {
   @Volatile
   private var pendingPaymentContinuation: CancellableContinuation<RobokassaPaymentResult>? = null
 
-  private var activeLauncher: Any? = null
-
   private val paymentLock = Any()
 
   override fun definition() = ModuleDefinition {
     Name("RobokassaRn")
 
     Function("isRobokassaSdkAvailable") {
-      isClassAvailable(PAYMENT_LAUNCHER_CLASS) && isClassAvailable(PAYMENT_PARAMS_CLASS)
+      isClassAvailable(ROBOKASSA_ACTIVITY_CLASS) && isClassAvailable(PAYMENT_PARAMS_CLASS)
     }
 
     (AsyncFunction("startPaymentAsync") Coroutine { options: RobokassaPaymentOptions ->
       val activity = appContext.currentActivity ?: throw MissingCurrentActivityException()
       launchPaymentAndAwaitResult(activity, options)
     }).runOnQueue(Queues.MAIN)
+
+    OnActivityResult { _, payload ->
+      if (payload.requestCode != ROBOKASSA_ACTIVITY_REQUEST_CODE) {
+        return@OnActivityResult
+      }
+      completePendingPayment(mapActivityResult(payload.resultCode, payload.data))
+    }
 
     OnDestroy {
       failPendingPayment(PaymentFlowInterruptedException())
@@ -55,12 +63,8 @@ class RobokassaRnModule : Module() {
     }
 
     try {
-      val launcher = createLauncher(activity)
-      activeLauncher = launcher
-      attachPaymentResultCallback(launcher)
-
       val paymentParams = createPaymentParams(options)
-      launchPayment(launcher, paymentParams)
+      launchPaymentActivity(activity, paymentParams)
     } catch (error: Throwable) {
       clearPendingState()
       continuation.resumeWithException(
@@ -70,64 +74,6 @@ class RobokassaRnModule : Module() {
         )
       )
     }
-  }
-
-  private fun createLauncher(activity: Activity): Any {
-    val launcherClass = loadRequiredClass(PAYMENT_LAUNCHER_CLASS)
-
-    val constructor = launcherClass.constructors.firstOrNull { candidate ->
-      candidate.parameterTypes.size == 1 && candidate.parameterTypes[0].isAssignableFrom(activity.javaClass)
-    } ?: throw UnsupportedSdkVersionException(
-      "RobokassaPayLauncher(Activity) constructor was not found. Check SDK version."
-    )
-
-    return constructor.newInstance(activity)
-  }
-
-  private fun attachPaymentResultCallback(launcher: Any) {
-    val callbackMethod = launcher.javaClass.methods.firstOrNull { candidate ->
-      candidate.name == "setPaymentResultCallback" && candidate.parameterTypes.size == 1
-    } ?: throw UnsupportedSdkVersionException(
-      "setPaymentResultCallback(listener) was not found in RobokassaPayLauncher."
-    )
-
-    val listenerType = callbackMethod.parameterTypes[0]
-    val callback = Proxy.newProxyInstance(
-      listenerType.classLoader,
-      arrayOf(listenerType)
-    ) { _, method, args ->
-      when (method.name) {
-        "onSuccessPayment" -> {
-          val invoiceId = (args?.firstOrNull() as? Number)?.toInt()
-          completePendingPayment(RobokassaPaymentResult(status = "success", invoiceId = invoiceId))
-          Unit
-        }
-
-        "onCanceledPayment" -> {
-          completePendingPayment(RobokassaPaymentResult(status = "cancelled"))
-          Unit
-        }
-
-        "onErrorPayment" -> {
-          val errorPayload = args?.firstOrNull()
-          completePendingPayment(
-            RobokassaPaymentResult(
-              status = "error",
-              errorCode = extractErrorValue(errorPayload, listOf("getCode", "getErrorCode", "code", "errorCode")),
-              errorDescription = extractErrorValue(errorPayload, listOf("getDescription", "getErrorDescription", "description", "message", "getMessage"))
-            )
-          )
-          Unit
-        }
-
-        "toString" -> "RobokassaPaymentResultListenerProxy"
-        "hashCode" -> System.identityHashCode(this)
-        "equals" -> false
-        else -> null
-      }
-    }
-
-    callbackMethod.invoke(launcher, callback)
   }
 
   private fun createPaymentParams(options: RobokassaPaymentOptions): Any {
@@ -146,6 +92,60 @@ class RobokassaRnModule : Module() {
     throw UnsupportedSdkVersionException(
       "Unable to instantiate PaymentParams. Check SDK compatibility."
     )
+  }
+
+  @Suppress("DEPRECATION")
+  private fun launchPaymentActivity(activity: Activity, paymentParams: Any) {
+    val activityClass = loadRequiredClass(ROBOKASSA_ACTIVITY_CLASS)
+    if (!Activity::class.java.isAssignableFrom(activityClass)) {
+      throw UnsupportedSdkVersionException("RobokassaActivity class is not an Activity.")
+    }
+
+    val parcelableParams = paymentParams as? Parcelable
+      ?: throw UnsupportedSdkVersionException("PaymentParams must implement Parcelable.")
+
+    @Suppress("UNCHECKED_CAST")
+    val target = activityClass as Class<out Activity>
+
+    val intent = Intent(activity, target).apply {
+      putExtra(EXTRA_PARAMS, parcelableParams)
+      putExtra(EXTRA_TEST_PARAMETERS, false)
+      putExtra(EXTRA_ONLY_CHECK, false)
+    }
+
+    activity.startActivityForResult(intent, ROBOKASSA_ACTIVITY_REQUEST_CODE)
+  }
+
+  private fun mapActivityResult(resultCode: Int, data: Intent?): RobokassaPaymentResult {
+    return when (resultCode) {
+      Activity.RESULT_OK -> RobokassaPaymentResult(
+        status = "success",
+        invoiceId = data?.getIntExtra(EXTRA_INVOICE_ID, -1)?.takeIf { it >= 0 }
+      )
+
+      Activity.RESULT_FIRST_USER -> {
+        val errorPayload = getSerializableExtraCompat(data, EXTRA_ERROR)
+        RobokassaPaymentResult(
+          status = "error",
+          errorCode = extractErrorValue(errorPayload, listOf("getCode", "getErrorCode", "code", "errorCode")),
+          errorDescription = data?.getStringExtra(EXTRA_ERROR_DESC)
+            ?: extractErrorValue(errorPayload, listOf("getDescription", "getErrorDescription", "description", "message", "getMessage"))
+            ?: "Payment failed"
+        )
+      }
+
+      else -> RobokassaPaymentResult(status = "cancelled")
+    }
+  }
+
+  private fun getSerializableExtraCompat(intent: Intent?, key: String): Any? {
+    if (intent == null) return null
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      intent.getSerializableExtra(key, Serializable::class.java)
+    } else {
+      @Suppress("DEPRECATION")
+      intent.getSerializableExtra(key)
+    }
   }
 
   private fun instantiateWithConstructors(
@@ -240,18 +240,6 @@ class RobokassaRnModule : Module() {
     }
 
     return paymentParams
-  }
-
-  private fun launchPayment(launcher: Any, paymentParams: Any) {
-    val launchMethod = launcher.javaClass.methods.firstOrNull { candidate ->
-      candidate.name == "launch" &&
-        candidate.parameterTypes.size == 1 &&
-        candidate.parameterTypes[0].isAssignableFrom(paymentParams.javaClass)
-    } ?: launcher.javaClass.methods.firstOrNull { candidate ->
-      candidate.name == "launch" && candidate.parameterTypes.size == 1
-    } ?: throw UnsupportedSdkVersionException("launch(PaymentParams) was not found in RobokassaPayLauncher.")
-
-    launchMethod.invoke(launcher, paymentParams)
   }
 
   private fun buildArgumentForParameter(
@@ -511,7 +499,6 @@ class RobokassaRnModule : Module() {
 
   private fun clearPendingState(): CancellableContinuation<RobokassaPaymentResult>? {
     synchronized(paymentLock) {
-      activeLauncher = null
       val continuation = pendingPaymentContinuation
       pendingPaymentContinuation = null
       return continuation
@@ -539,7 +526,16 @@ class RobokassaRnModule : Module() {
   }
 
   companion object {
-    private const val PAYMENT_LAUNCHER_CLASS = "com.robokassa.library.pay.RobokassaPayLauncher"
+    private const val ROBOKASSA_ACTIVITY_CLASS = "com.robokassa.library.view.RobokassaActivity"
+    private const val ROBOKASSA_ACTIVITY_REQUEST_CODE = 54731
+
+    private const val EXTRA_PARAMS = "com.robokassa.PAYMENT_PARAMS"
+    private const val EXTRA_ONLY_CHECK = "com.robokassa.ONLY_CHECK"
+    private const val EXTRA_TEST_PARAMETERS = "com.robokassa.TEST_PARAMETERS"
+    private const val EXTRA_INVOICE_ID = "com.robokassa.PAYMENT_INVOICE_ID"
+    private const val EXTRA_ERROR = "com.robokassa.PAY_ERROR"
+    private const val EXTRA_ERROR_DESC = "com.robokassa.PAYMENT_ERROR_DESC"
+
     private const val PAYMENT_PARAMS_CLASS = "com.robokassa.library.params.PaymentParams"
     private const val ORDER_PARAMS_CLASS = "com.robokassa.library.params.OrderParams"
     private const val CUSTOMER_PARAMS_CLASS = "com.robokassa.library.params.CustomerParams"
