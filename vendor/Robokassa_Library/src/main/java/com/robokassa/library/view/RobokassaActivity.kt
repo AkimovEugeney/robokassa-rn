@@ -313,11 +313,12 @@ class RobokassaActivity : AppCompatActivity() {
     }
 
     private fun checkUrl(url: String?): Boolean {
-        return url?.startsWith(
-            paymentParams.redirectUrl
-        ) == true || url?.startsWith(
-            "https://auth.robokassa.ru/Merchant/State/"
-        ) == true || url?.contains("ipol.tech/") == true || url?.contains("ipol.ru/") == true
+        val targetUrl = url ?: return false
+        val redirectUrl = paymentParams.redirectUrl.takeIf { it.isNotBlank() }
+        return (redirectUrl != null && targetUrl.startsWith(redirectUrl)) ||
+            targetUrl.startsWith("https://auth.robokassa.ru/Merchant/State/") ||
+            targetUrl.contains("ipol.tech/") ||
+            targetUrl.contains("ipol.ru/")
     }
 
     private fun checkWebLinks(url: String?): Boolean {

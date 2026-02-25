@@ -22,10 +22,12 @@ npm install robokassa-rn
       [
         "robokassa-rn",
         {
+          "autoVerify": false,
           "returnUrls": [
             "https://pay.example.com/robokassa/success",
             "https://pay.example.com/robokassa/fail"
-          ]
+          ],
+          "redirectUrl": "https://pay.example.com/robokassa/success"
         }
       ]
     ]
@@ -40,6 +42,11 @@ npx expo prebuild
 ```
 
 После изменений в `plugins` снова запускайте `npx expo prebuild`.
+
+Параметры плагина:
+- `returnUrls` — URL'ы для intent-filter.
+- `redirectUrl` — URL, который будет передан в `paymentParams.redirectUrl` (по умолчанию берется первый `returnUrls`).
+- `autoVerify` — верификация app links Android (`false` удобнее, если домен не настроен через `assetlinks.json`).
 
 ## Быстрый пример оплаты
 

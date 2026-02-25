@@ -1,10 +1,14 @@
 const {
+  AndroidConfig,
   createRunOncePlugin,
+  withAndroidManifest,
   withAppBuildGradle,
   withSettingsGradle,
 } = require('expo/config-plugins');
 
 const pkg = require('../package.json');
+const REDIRECT_URL_META_DATA_NAME = 'robokassa.redirectUrl';
+const DEFAULT_REDIRECT_URL = 'https://auth.robokassa.ru/Merchant/State/';
 
 function normalizePathPrefix(pathPrefix) {
   if (typeof pathPrefix !== 'string') {
@@ -100,6 +104,13 @@ function fingerprintIntentFilter(filter) {
 }
 
 function normalizeOptions(options) {
+  const returnUrls = Array.isArray(options.returnUrls)
+    ? options.returnUrls.filter((value) => typeof value === 'string' && value.length > 0)
+    : [];
+  const redirectUrl = typeof options.redirectUrl === 'string' && options.redirectUrl.length > 0
+    ? options.redirectUrl
+    : returnUrls[0] ?? DEFAULT_REDIRECT_URL;
+
   return {
     configureAndroidSdk: options.configureAndroidSdk !== false,
     androidSdkModuleName: options.androidSdkModuleName ?? 'Robokassa_Library',
@@ -109,7 +120,8 @@ function normalizeOptions(options) {
     deepLinkScheme: options.deepLinkScheme ?? options.scheme ?? 'robokassa',
     deepLinkHost: options.deepLinkHost ?? options.host ?? 'open',
     deepLinkPathPrefix: options.deepLinkPathPrefix ?? options.pathPrefix,
-    returnUrls: Array.isArray(options.returnUrls) ? options.returnUrls : [],
+    returnUrls,
+    redirectUrl,
     autoVerify: options.autoVerify !== false,
   };
 }
@@ -217,10 +229,28 @@ function withRobokassaIntentFilters(config, options) {
   return config;
 }
 
+function withRobokassaRedirectMetaData(config, options) {
+  return withAndroidManifest(config, (config) => {
+    const mainApplication = AndroidConfig.Manifest.getMainApplicationOrThrow(config.modResults);
+    AndroidConfig.Manifest.removeMetaDataItemFromMainApplication(
+      mainApplication,
+      REDIRECT_URL_META_DATA_NAME
+    );
+    AndroidConfig.Manifest.addMetaDataItemToMainApplication(
+      mainApplication,
+      REDIRECT_URL_META_DATA_NAME,
+      options.redirectUrl,
+      'value'
+    );
+    return config;
+  });
+}
+
 const withRobokassaDeepLink = (config, props = {}) => {
   const options = normalizeOptions(props);
   config = withRobokassaIntentFilters(config, options);
-  return withRobokassaAndroidSdk(config, options);
+  config = withRobokassaAndroidSdk(config, options);
+  return withRobokassaRedirectMetaData(config, options);
 };
 
 module.exports = createRunOncePlugin(withRobokassaDeepLink, pkg.name, pkg.version);

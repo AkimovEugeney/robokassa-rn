@@ -2,6 +2,7 @@ package expo.modules.robokassarn
 
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Parcelable
 import expo.modules.kotlin.functions.Coroutine
@@ -63,7 +64,8 @@ class RobokassaRnModule : Module() {
     }
 
     try {
-      val paymentParams = createPaymentParams(options)
+      val redirectUrl = resolveRedirectUrl(activity)
+      val paymentParams = createPaymentParams(options, redirectUrl)
       launchPaymentActivity(activity, paymentParams, options.testMode)
     } catch (error: Throwable) {
       clearPendingState()
@@ -77,15 +79,16 @@ class RobokassaRnModule : Module() {
     }
   }
 
-  private fun createPaymentParams(options: RobokassaPaymentOptions): Any {
+  private fun createPaymentParams(options: RobokassaPaymentOptions, redirectUrl: String): Any {
     val paymentParamsClass = loadRequiredClass(PAYMENT_PARAMS_CLASS)
     val cultureValue = resolveCultureConstant(options.culture)
 
-    instantiateWithNoArgAndSetters(paymentParamsClass, options, cultureValue)?.let {
+    instantiateWithNoArgAndSetters(paymentParamsClass, options, cultureValue, redirectUrl)?.let {
       applyExtraParams(it, options.extra)
       return it
     }
     instantiateWithConstructors(paymentParamsClass, options, cultureValue)?.let {
+      setPropertyIfPresent(it, "redirectUrl", redirectUrl)
       applyExtraParams(it, options.extra)
       return it
     }
@@ -177,17 +180,19 @@ class RobokassaRnModule : Module() {
   private fun instantiateWithNoArgAndSetters(
     paymentParamsClass: Class<*>,
     options: RobokassaPaymentOptions,
-    cultureValue: Any?
+    cultureValue: Any?,
+    redirectUrl: String
   ): Any? {
     val normalizedExtra = normalizeExtraParams(options.extra)
     val constructor = paymentParamsClass.declaredConstructors.firstOrNull { it.parameterTypes.isEmpty() } ?: return null
 
     val paymentParams = constructor.newInstance()
-    invokeMethodIfPresent(paymentParams, "setCredentials", options.merchantLogin, options.password1, options.password2, "")
+    invokeMethodIfPresent(paymentParams, "setCredentials", options.merchantLogin, options.password1, options.password2, redirectUrl)
 
     setPropertyIfPresent(paymentParams, "merchantLogin", options.merchantLogin)
     setPropertyIfPresent(paymentParams, "password1", options.password1)
     setPropertyIfPresent(paymentParams, "password2", options.password2)
+    setPropertyIfPresent(paymentParams, "redirectUrl", redirectUrl)
     setPropertyIfPresent(paymentParams, "invoiceId", options.invoiceId)
     setPropertyIfPresent(paymentParams, "orderSum", options.orderSum)
     setPropertyIfPresent(paymentParams, "description", options.description)
@@ -521,6 +526,25 @@ class RobokassaRnModule : Module() {
     return loadOptionalClass(className) ?: throw RobokassaSdkMissingException(className)
   }
 
+  private fun resolveRedirectUrl(activity: Activity): String {
+    val context = activity.applicationContext
+    val metaRedirectUrl = runCatching {
+      val packageManager = context.packageManager
+      val appInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        packageManager.getApplicationInfo(
+          context.packageName,
+          PackageManager.ApplicationInfoFlags.of(PackageManager.GET_META_DATA.toLong())
+        )
+      } else {
+        @Suppress("DEPRECATION")
+        packageManager.getApplicationInfo(context.packageName, PackageManager.GET_META_DATA)
+      }
+      appInfo.metaData?.getString(REDIRECT_URL_META_DATA_NAME)
+    }.getOrNull()
+
+    return metaRedirectUrl?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_REDIRECT_URL
+  }
+
   private fun loadOptionalClass(className: String): Class<*>? {
     return runCatching { Class.forName(className) }.getOrNull()
   }
@@ -547,6 +571,8 @@ class RobokassaRnModule : Module() {
     private const val EXTRA_INVOICE_ID = "com.robokassa.PAYMENT_INVOICE_ID"
     private const val EXTRA_ERROR = "com.robokassa.PAY_ERROR"
     private const val EXTRA_ERROR_DESC = "com.robokassa.PAYMENT_ERROR_DESC"
+    private const val REDIRECT_URL_META_DATA_NAME = "robokassa.redirectUrl"
+    private const val DEFAULT_REDIRECT_URL = "https://auth.robokassa.ru/Merchant/State/"
 
     private const val PAYMENT_PARAMS_CLASS = "com.robokassa.library.params.PaymentParams"
     private const val ORDER_PARAMS_CLASS = "com.robokassa.library.params.OrderParams"
