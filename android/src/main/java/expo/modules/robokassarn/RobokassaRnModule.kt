@@ -128,12 +128,19 @@ class RobokassaRnModule : Module() {
       )
 
       Activity.RESULT_FIRST_USER -> {
+        val resultCodePayload = getSerializableExtraCompat(data, EXTRA_CODE_RESULT)
+        val stateCodePayload = getSerializableExtraCompat(data, EXTRA_CODE_STATE)
+        val resultCode = extractSdkCode(resultCodePayload)
+        val stateCode = extractSdkCode(stateCodePayload)
         val errorPayload = getSerializableExtraCompat(data, EXTRA_ERROR)
+        val composedErrorCode = composeErrorCode(resultCode, stateCode)
         RobokassaPaymentResult(
           status = "error",
-          errorCode = extractErrorValue(errorPayload, listOf("getCode", "getErrorCode", "code", "errorCode")),
+          errorCode = composedErrorCode
+            ?: extractErrorValue(errorPayload, listOf("getCode", "getErrorCode", "code", "errorCode")),
           errorDescription = data?.getStringExtra(EXTRA_ERROR_DESC)
             ?: extractErrorValue(errorPayload, listOf("getDescription", "getErrorDescription", "description", "message", "getMessage"))
+            ?: composeErrorDescription(resultCode, stateCode)
             ?: "Payment failed"
         )
       }
@@ -420,6 +427,25 @@ class RobokassaRnModule : Module() {
     return errorPayload.toString().takeIf { it.isNotBlank() }
   }
 
+  private fun extractSdkCode(payload: Any?): String? {
+    return extractErrorValue(payload, listOf("getCode", "code", "name"))
+      ?.trim()
+      ?.takeIf { it.isNotEmpty() }
+  }
+
+  private fun composeErrorCode(resultCode: String?, stateCode: String?): String? {
+    val parts = listOfNotNull(
+      resultCode?.let { "result:$it" },
+      stateCode?.let { "state:$it" }
+    )
+    return parts.takeIf { it.isNotEmpty() }?.joinToString("|")
+  }
+
+  private fun composeErrorDescription(resultCode: String?, stateCode: String?): String? {
+    val code = composeErrorCode(resultCode, stateCode) ?: return null
+    return "Payment failed ($code)"
+  }
+
   private fun invokeMethodIfPresent(target: Any, methodName: String, vararg values: Any?): Any? {
     val method = target.javaClass.methods.firstOrNull { candidate ->
       candidate.name == methodName && candidate.parameterTypes.size == values.size
@@ -569,6 +595,8 @@ class RobokassaRnModule : Module() {
     private const val EXTRA_ONLY_CHECK = "com.robokassa.ONLY_CHECK"
     private const val EXTRA_TEST_PARAMETERS = "com.robokassa.TEST_PARAMETERS"
     private const val EXTRA_INVOICE_ID = "com.robokassa.PAYMENT_INVOICE_ID"
+    private const val EXTRA_CODE_RESULT = "com.robokassa.PAYMENT_CODE_RESULT"
+    private const val EXTRA_CODE_STATE = "com.robokassa.PAYMENT_CODE_STATE"
     private const val EXTRA_ERROR = "com.robokassa.PAY_ERROR"
     private const val EXTRA_ERROR_DESC = "com.robokassa.PAYMENT_ERROR_DESC"
     private const val REDIRECT_URL_META_DATA_NAME = "robokassa.redirectUrl"

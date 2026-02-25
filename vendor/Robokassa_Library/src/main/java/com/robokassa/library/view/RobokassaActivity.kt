@@ -163,8 +163,7 @@ class RobokassaActivity : AppCompatActivity() {
                                 it.requestCode == CheckRequestCode.SERVER_ERROR ||
                                 it.requestCode == CheckRequestCode.SIGNATURE_ERROR ||
                                 it.requestCode == CheckRequestCode.SHOP_ERROR ||
-                                it.requestCode == CheckRequestCode.INVOICE_DOUBLE_ERROR ||
-                                it.requestCode == CheckRequestCode.INVOICE_ZERO_ERROR
+                                it.requestCode == CheckRequestCode.INVOICE_DOUBLE_ERROR
                             ) {
                                 model.stopStatusTimer(this@RobokassaActivity)
                                 setResult(RESULT_FIRST_USER, data)
