@@ -134,12 +134,19 @@ class RobokassaRnModule : Module() {
         val stateCode = extractSdkCode(stateCodePayload)
         val errorPayload = getSerializableExtraCompat(data, EXTRA_ERROR)
         val composedErrorCode = composeErrorCode(resultCode, stateCode)
+        val extraErrorDescription = data?.getStringExtra(EXTRA_ERROR_DESC)
+          ?.trim()
+          ?.takeIf { it.isNotEmpty() }
+        val extractedErrorDescription = extractErrorValue(
+          errorPayload,
+          listOf("getDescription", "getErrorDescription", "description", "message", "getMessage")
+        )?.trim()?.takeIf { it.isNotEmpty() }
         RobokassaPaymentResult(
           status = "error",
           errorCode = composedErrorCode
             ?: extractErrorValue(errorPayload, listOf("getCode", "getErrorCode", "code", "errorCode")),
-          errorDescription = data?.getStringExtra(EXTRA_ERROR_DESC)
-            ?: extractErrorValue(errorPayload, listOf("getDescription", "getErrorDescription", "description", "message", "getMessage"))
+          errorDescription = extraErrorDescription
+            ?: extractedErrorDescription
             ?: composeErrorDescription(resultCode, stateCode)
             ?: "Payment failed"
         )
@@ -442,6 +449,9 @@ class RobokassaRnModule : Module() {
   }
 
   private fun composeErrorDescription(resultCode: String?, stateCode: String?): String? {
+    if (resultCode == CHECK_REQUEST_SERVER_ERROR_CODE) {
+      return "Серверная ошибка проверки статуса (result:1000). «Успешный экран» еще не означает, что операция подтверждена."
+    }
     val code = composeErrorCode(resultCode, stateCode) ?: return null
     return "Payment failed ($code)"
   }
@@ -588,6 +598,8 @@ class RobokassaRnModule : Module() {
   }
 
   companion object {
+    private const val CHECK_REQUEST_SERVER_ERROR_CODE = "1000"
+
     private const val ROBOKASSA_ACTIVITY_CLASS = "com.robokassa.library.view.RobokassaActivity"
     private const val ROBOKASSA_ACTIVITY_REQUEST_CODE = 54731
 
